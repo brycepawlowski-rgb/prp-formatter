@@ -4,7 +4,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from datetime import datetime
-import io, os
+import io, os, zipfile, re
 
 app = Flask(__name__)
 
@@ -84,10 +84,7 @@ footer{font-size:11px;color:#b0b8c8;padding:16px;text-align:center}
       <button id="btn" onclick="run()" disabled>⚙️ &nbsp;Format Report</button>
       <div id="pw"><div class="pt"><div class="pf" id="pf"></div></div><div id="pl">Processing…</div></div>
       <div class="st" id="st"></div>
-      <button id="dl" onclick="document.getElementById('dlform').submit()">⬇️ &nbsp;Download Formatted Report</button>
-      <form id="dlform" method="POST" action="/format" enctype="multipart/form-data" style="display:none">
-        <input type="file" id="dlfi" name="file">
-      </form>
+      <button id="dl">⬇️ &nbsp;Download Formatted Report</button>
     </div>
   </div>
   <div class="card">
@@ -104,7 +101,7 @@ footer{font-size:11px;color:#b0b8c8;padding:16px;text-align:center}
 </main>
 <footer>A&amp;K Finishing LLC &middot; PRP Formatter &middot; Files are processed securely and never stored</footer>
 <script>
-let sf=null;
+let sf=null,dlUrl=null;
 function ev(e,t){e.preventDefault();const z=document.getElementById('dz');if(t==='over')z.classList.add('over');if(t==='leave')z.classList.remove('over');if(t==='drop'){z.classList.remove('over');const f=e.dataTransfer.files[0];if(f&&f.name.endsWith('.xlsx'))pick(f);else show('Please drop an .xlsx file.',false);}}
 function pick(f){sf=f;document.getElementById('fn').textContent=f.name;document.getElementById('fs').textContent=(f.size/1024).toFixed(1)+' KB';document.getElementById('pill').style.display='flex';document.getElementById('btn').disabled=false;document.getElementById('st').style.display='none';document.getElementById('dl').style.display='none';}
 function clr(){sf=null;document.getElementById('fi').value='';document.getElementById('pill').style.display='none';document.getElementById('btn').disabled=true;document.getElementById('st').style.display='none';document.getElementById('dl').style.display='none';}
@@ -124,14 +121,14 @@ async function run(){
     if(!r.ok){throw new Error(await r.text());}
     prog(90,'Preparing download…');
     const blob=await r.blob();
-    const url=URL.createObjectURL(blob);
+    dlUrl=URL.createObjectURL(blob);
     prog(100,'Done!');
     setTimeout(()=>{
       document.getElementById('pw').style.display='none';
       show('✓ Report formatted successfully!',true);
       const dlBtn=document.getElementById('dl');
       dlBtn.style.display='flex';
-      dlBtn.onclick=()=>{const a=document.createElement('a');a.href=url;a.download=sf.name.replace('.xlsx','')+'_formatted.xlsx';a.click();};
+      dlBtn.onclick=()=>{const a=document.createElement('a');a.href=dlUrl;a.download=sf.name.replace('.xlsx','')+'_formatted.xlsx';a.click();};
       document.getElementById('btn').disabled=false;
     },300);
   }catch(e){
@@ -144,6 +141,22 @@ async function run(){
 </body>
 </html>"""
 
+def read_plex_excel(file_bytes):
+    """Read Plex xlsx, patching the corrupt numFmtId='undefined' bug in Plex exports."""
+    buf_in = io.BytesIO(file_bytes)
+    buf_out = io.BytesIO()
+    with zipfile.ZipFile(buf_in, 'r') as zin:
+        with zipfile.ZipFile(buf_out, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for name in zin.namelist():
+                data = zin.read(name)
+                if name == 'xl/styles.xml':
+                    text = data.decode('utf-8')
+                    text = re.sub(r'numFmtId="undefined"', 'numFmtId="0"', text)
+                    data = text.encode('utf-8')
+                zout.writestr(name, data)
+    buf_out.seek(0)
+    return pd.read_excel(buf_out)
+
 def format_prp(file_bytes):
     NAVY='1F3864';WHT='FFFFFF';LGRY='F2F2F2';ORG='F4B942'
     REDB='F4CCCC';REDF='CC0000';CRBG='EEF3FB';BDR='BFBFBF'
@@ -152,12 +165,13 @@ def format_prp(file_bytes):
         s=Side(style='thin',color=BDR)
         return Border(left=s,right=s,top=s,bottom=s)
     def si(v):
-        try: return int(v)
+        try: return int(float(str(v).strip()))
         except: return 0
 
-    df=pd.read_excel(io.BytesIO(file_bytes))
+    df = read_plex_excel(file_bytes)
     df['Customer Part']=df['Customer Part'].astype(str).str.replace(r'_x000D_\s*','; ',regex=True)
     df['Related Parts']=df['Related Parts'].astype(str).str.replace(',',', ')
+
     cols=list(df.columns)
     si_end=cols.index('Non Useable Inventory')
     DATE_COLS=cols[si_end+2:]
@@ -200,8 +214,8 @@ def format_prp(file_bytes):
             ws.row_dimensions[cur].height=42 if di==0 else 15
             rbg=CRBG if dtype=='Customer Releases' else LGRY if dtype=='Net' else 'FFFFFF'
 
-            def wc(col,val,bg,bold=False,italic=False,color='000000',wrap=False,align='left',vtop=False):
-                cell=ws.cell(cur,col,val)
+            def wc(col,val,bg,bold=False,italic=False,color='000000',wrap=False,align='left',vtop=False,_cur=cur):
+                cell=ws.cell(_cur,col,val)
                 cell.font=Font(name='Arial',size=9,bold=bold,italic=italic,color=color)
                 cell.fill=tf(bg)
                 cell.alignment=Alignment(horizontal=align,vertical='top' if vtop else 'center',wrap_text=wrap)
